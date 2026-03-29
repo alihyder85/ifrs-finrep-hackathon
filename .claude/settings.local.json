@@ -7,7 +7,23 @@
       "Bash(brew install:*)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(gh repo:*)",
+      "Bash(npm install:*)",
+      "Bash(pkill -f \"next dev\")",
+      "Bash(npm run:*)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:password@localhost:5432/finrep_dev\" npm run db:seed)",
+      "Bash(pg_isready)",
+      "Bash(brew services:*)",
+      "Read(//Applications/**)",
+      "Bash(brew list:*)",
+      "Bash(open -a Docker)",
+      "Bash(docker info:*)",
+      "Bash(docker run:*)",
+      "Bash(until docker:*)",
+      "Bash(do sleep:*)",
+      "Bash(done)",
+      "Bash(npx prisma:*)"
     ]
   }
 }

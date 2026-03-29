@@ -253,6 +253,68 @@ When implementing each slice:
 
 ---
 
+## Coding Conventions
+
+These conventions must be applied consistently across all slices so that generated code is predictable and compatible when prompts are run in sequence.
+
+### File and Component Naming
+- Page server components: `page.tsx` (lowercase, Next.js convention)
+- Page client components: `<FeatureName>Client.tsx` — e.g. `ReportGridClient.tsx`, `ReportsClient.tsx`
+- Feature components: `PascalCase.tsx` — e.g. `UploadForm.tsx`, `AIRefinementPanel.tsx`
+- UI primitives: `src/components/ui/<name>.tsx` — e.g. `button.tsx`, `card.tsx`, `toast.tsx`
+- Layout components: `src/components/layout/<Name>.tsx` — e.g. `AppShell.tsx`, `Header.tsx`, `Sidebar.tsx`
+- API routes: `src/app/api/<path>/route.ts`
+- Library modules: `src/lib/<domain>/<module>.ts` — e.g. `src/lib/parser/excel-parser.ts`
+- Type definitions: `src/types/index.ts`
+
+### TypeScript Conventions
+- All components and functions must be strongly typed — no `any`
+- Use `type` for unions and primitives; `interface` for object shapes
+- Export types from `src/types/index.ts` where they are shared across slices
+- Zod schemas defined in the same file as the route handler that uses them
+- All API route handlers export named async functions: `GET`, `POST`, `PATCH`, `PUT`, `DELETE`
+
+### State Variable Naming
+Use these consistent naming patterns in client components:
+
+| Purpose | Pattern | Example |
+|---|---|---|
+| Primary data | noun | `rows`, `commentary`, `report` |
+| Selected ID | `selected<Noun>Id` | `selectedRowId` |
+| Edit mode toggle | `editing<Noun>` | `editingTag`, `editingValues` |
+| Input buffer | `<noun>Value` / `<noun>Input` | `tagValue`, `commentaryText` |
+| Loading state | `<noun>Loading` / `<noun>Saving` | `commentaryLoading`, `tagSaving` |
+| Error state | `<noun>Error` | `commentaryError`, `tagError` |
+| Success flash | `<noun>Saved` | `commentarySaved` |
+
+### API Fetch Patterns
+- Save/update functions: `save<Noun>()` — e.g. `saveCommentary()`, `saveTag()`, `saveValues()`
+- All fetch calls use the native `fetch` API (not axios or SWR)
+- Always handle `.catch` or wrap in `try/catch`; show error via toast or inline message
+- On network error show: `"Network error — please try again"`
+
+### Styling Conventions
+- Use `cn()` from `src/lib/utils.ts` for all conditional class logic
+- CSS custom properties defined in `globals.css` must be used for all theme colours — never hardcode hex values
+- Finance numbers: always use the `.num` class for grid cells; `.num-negative` for negative values; `.num-positive` for positive variance
+- Negative financial values displayed as `(496)` not `-496`
+- Null/missing values displayed as `—` (em dash)
+
+### Client vs Server Components
+- All pages that only fetch data and pass props: server component (no `"use client"`)
+- All components with `useState`, `useEffect`, event handlers, or browser APIs: client component with `"use client"` at the top
+- `AppShell` is always a client component (wraps `ToastProvider`)
+- `layout.tsx` is always a server component — do not add `"use client"` to it
+
+### API Route Conventions
+- All route handlers validate input with Zod before touching the database
+- Return `NextResponse.json({ error: "..." }, { status: 4xx })` for client errors
+- Return `NextResponse.json({ error: "..." }, { status: 500 })` for server errors
+- Never expose raw Prisma error messages to the client
+- Transactions: use `prisma.$transaction([...])` when creating related records together (e.g. Report + ReportRows on upload)
+
+---
+
 ## Output Priority Order
 
 Always optimize for:

@@ -1,0 +1,91 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Report {
+  id              String       @id @default(cuid())
+  name            String
+  reportingPeriod String
+  currency        String       @default("USD")
+  sourceFileName  String
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  commentaries    Commentary[]
+  refinements     CommentaryRefinement[]
+  rows            ReportRow[]
+}
+
+model ReportRow {
+  id                     String       @id @default(cuid())
+  reportId               String
+  rowIndex               Int
+  sourceCode             String
+  label                  String
+  section                String?
+  displayType            String?
+  currentValue           Float?
+  priorValue             Float?
+  varianceValue          Float?
+  variancePercent        Float?
+  referenceTag           String?
+  rawCurrentText         String?
+  rawPriorText           String?
+  rawVarianceText        String?
+  rawVariancePercentText String?
+  rawReferenceText       String?
+  commentaries           Commentary[]
+  refinements            CommentaryRefinement[]
+  report                 Report       @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, rowIndex])
+  @@index([reportId, sourceCode])
+}
+
+model Commentary {
+  id                   String    @id @default(cuid())
+  reportId             String
+  reportRowId          String
+  sourceCode           String
+  referenceTagSnapshot String?
+  commentaryText       String
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  report               Report    @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  reportRow            ReportRow @relation(fields: [reportRowId], references: [id], onDelete: Cascade)
+
+  @@index([reportId, sourceCode])
+  @@index([reportRowId])
+}
+
+// Stores AI-assisted commentary review results.
+// Kept strictly separate from Commentary to preserve audit trail:
+//   originalCommentarySnapshot = what the analyst wrote
+//   aiRefinedCommentary        = what the AI proposed
+//   refinementStatus           = human decision (PENDING_REVIEW | ACCEPTED | DISMISSED | EDITED_AND_ACCEPTED)
+model CommentaryRefinement {
+  id                         String   @id @default(cuid())
+  reportId                   String
+  reportRowId                String
+  sourceCode                 String
+  originalCommentarySnapshot String
+  aiRefinedCommentary        String?
+  aiValidationStatus         String?  // "yes" | "no" | "partially"
+  aiIssuesJson               String?  // JSON-encoded AIIssue[]
+  aiConfidenceNote           String?
+  refinementStatus           String   @default("PENDING_REVIEW")
+  // PENDING_REVIEW | ACCEPTED | DISMISSED | EDITED_AND_ACCEPTED
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  report    Report    @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  reportRow ReportRow @relation(fields: [reportRowId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+  @@index([reportRowId])
+  @@index([reportId, refinementStatus])
+}
