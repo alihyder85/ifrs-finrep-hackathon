@@ -7,6 +7,9 @@ const putSchema = z.object({
     .string()
     .min(1, "Commentary cannot be empty")
     .max(5000, "Commentary must be under 5000 characters"),
+  referenceTag: z
+    .string()
+    .regex(/^[A-Z]\d+(\.\d+)?$/, "Reference tag format must be like A1, C1.1, M1.8"),
 });
 
 type Params = { params: Promise<{ reportId: string; rowId: string }> };
@@ -58,11 +61,13 @@ export async function PUT(req: NextRequest, { params }: Params) {
     select: { id: true },
   });
 
+  const { commentaryText, referenceTag } = parsed.data;
+
   let commentary;
   if (existing) {
     commentary = await prisma.commentary.update({
       where: { id: existing.id },
-      data: { commentaryText: parsed.data.commentaryText },
+      data: { commentaryText, referenceTagSnapshot: referenceTag },
     });
   } else {
     commentary = await prisma.commentary.create({
@@ -70,11 +75,22 @@ export async function PUT(req: NextRequest, { params }: Params) {
         reportId,
         reportRowId: rowId,
         sourceCode: row.sourceCode,
-        referenceTagSnapshot: row.referenceTag,
-        commentaryText: parsed.data.commentaryText,
+        referenceTagSnapshot: referenceTag,
+        commentaryText,
       },
     });
   }
 
-  return NextResponse.json({ commentary }, { status: existing ? 200 : 201 });
+  // If the row had no reference tag, persist the one the user provided
+  if (!row.referenceTag) {
+    await prisma.reportRow.update({
+      where: { id: rowId },
+      data: { referenceTag },
+    });
+  }
+
+  return NextResponse.json(
+    { commentary, referenceTag: row.referenceTag ?? referenceTag },
+    { status: existing ? 200 : 201 }
+  );
 }

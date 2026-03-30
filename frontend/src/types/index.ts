@@ -60,6 +60,7 @@ export interface Commentary {
   referenceTagSnapshot: string | null;
 
   commentaryText: string;
+  commentarySource: string; // "IMPORTED" | "USER"
   createdAt: Date;
   updatedAt: Date;
 }

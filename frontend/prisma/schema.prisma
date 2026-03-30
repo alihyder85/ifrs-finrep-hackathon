@@ -53,6 +53,7 @@ model Commentary {
   sourceCode           String
   referenceTagSnapshot String?
   commentaryText       String
+  commentarySource     String    @default("USER") // "IMPORTED" | "USER"
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
   report               Report    @relation(fields: [reportId], references: [id], onDelete: Cascade)

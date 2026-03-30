@@ -3,8 +3,33 @@
  *
  * Entry point: parseWorkbook(buffer)
  *
- * Returns structured ParsedRow records ready to insert into the database,
- * plus any diagnostic warnings.
+ * Handles TWO commentary layouts that can appear in the same sheet:
+ *
+ * Layout A — Inline (commentary immediately after each financial row):
+ *   P110100 | Net Interest Income | 571 | ... | A1
+ *            | • Fixed interest income decreased...
+ *            | • Irregular deposits decreased...
+ *   P120100 | Customer deposits | (84) | ...
+ *
+ *   Detection: after pushing a detail row with a referenceTag, subsequent
+ *   text-only rows (no source code, no numeric values) are buffered as
+ *   commentary for that row.
+ *
+ * Layout B — Block at bottom (all commentary grouped after the income statement):
+ *   A1       | Net Interest Income | 571 |
+ *            | • Fixed interest income decreased...
+ *            | • Irregular deposits decreased...
+ *   B1       | Customer deposits   | (84) |
+ *            | • Interest expense decreased...
+ *
+ *   Detection: a row where the source-code column contains a reference-tag
+ *   pattern (A1, B1, C1.1, …) instead of a P-code is treated as a commentary
+ *   section header. It is NOT added to parsedRows. Subsequent text-only rows
+ *   are buffered as commentary and matched to the financial row with that
+ *   referenceTag in the upload route.
+ *
+ * Commentary rows are never added to parsedRows — they produce ParsedCommentary
+ * records only, which the upload route converts to Commentary DB records.
  */
 
 import * as XLSX from "xlsx";
@@ -20,8 +45,8 @@ export interface ParsedRow {
   rowIndex: number;
 
   // Source lineage
-  sourceCode: string; // empty string for non-detail rows
-  label: string; // empty string for blank rows
+  sourceCode: string;
+  label: string;
 
   // Classification
   section: string | null;
@@ -44,8 +69,28 @@ export interface ParsedRow {
   rawReferenceText: string | null;
 }
 
+/**
+ * Commentary extracted from the sheet and associated to a financial row.
+ *
+ * parentRowIndex — set for Layout A (inline). The rowIndex value of the
+ *   parent ParsedRow. Used for precise matching in the upload route.
+ *
+ * referenceTag — always set. For Layout B (block at bottom), this is the
+ *   only key available; the upload route matches it against ReportRow.referenceTag.
+ *
+ * sourceCode — set for Layout A (copied from the parent detail row).
+ *   Empty string for Layout B (resolved in the upload route after matching).
+ */
+export interface ParsedCommentary {
+  parentRowIndex: number | null;
+  sourceCode: string;
+  referenceTag: string;
+  commentaryText: string;
+}
+
 export interface ParseResult {
   rows: ParsedRow[];
+  commentaries: ParsedCommentary[];
   sheetName: string;
   warnings: string[];
 }
@@ -53,12 +98,10 @@ export interface ParseResult {
 const SOURCE_CODE_RE = /^P[A-Z0-9]{4,7}$/;
 const REFERENCE_TAG_RE = /^[A-Z]\d+(\.\d+)?$/;
 
-/** Returns true if every cell in the row is null / undefined / empty string. */
 function isBlankRow(row: unknown[]): boolean {
   return row.every((v) => v === null || v === undefined || v === "");
 }
 
-/** Classifies a row that has no source code. */
 function classifyNonDetailRow(
   label: string,
   hasAnyNumeric: boolean
@@ -70,17 +113,6 @@ function classifyNonDetailRow(
   return "header";
 }
 
-/**
- * Parses an Excel workbook buffer and returns structured financial rows.
- *
- * The parser:
- *  1. Reads the first sheet (or the sheet with the most rows, as a heuristic).
- *  2. Detects column positions using column-detector heuristics.
- *  3. Iterates every row, extracts and normalizes values.
- *  4. Classifies each row (detail / header / subtotal / total / blank).
- *  5. Tracks "section" context from header rows.
- *  6. Preserves raw cell text alongside normalized values.
- */
 export function parseWorkbook(buffer: Buffer): ParseResult {
   const warnings: string[] = [];
 
@@ -89,9 +121,9 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
   try {
     wb = XLSX.read(buffer, {
       type: "buffer",
-      cellDates: false, // keep dates as numbers; we don't need them here
+      cellDates: false,
       cellNF: false,
-      cellText: true, // populate .w (formatted text) alongside .v (value)
+      cellText: true,
     });
   } catch (err) {
     throw new Error(`Failed to read workbook: ${(err as Error).message}`);
@@ -101,7 +133,7 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
     throw new Error("Workbook contains no sheets");
   }
 
-  // Prefer the sheet with the most rows (likely the statement sheet)
+  // Prefer the sheet with the most rows
   let sheetName = wb.SheetNames[0];
   if (wb.SheetNames.length > 1) {
     let maxRows = 0;
@@ -122,7 +154,6 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
 
   const sheet = wb.Sheets[sheetName];
 
-  // Get raw values as array-of-arrays; missing cells become null via defval
   const rawRows: unknown[][] = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: null,
@@ -133,12 +164,11 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
     throw new Error(`Sheet "${sheetName}" is empty`);
   }
 
-  // Also get formatted-text rows so we can store the raw display string
   const textRows: string[][] = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
     blankrows: true,
-    raw: false, // use formatted text (.w)
+    raw: false,
   });
 
   const cellAt = (rowIdx: number, colIdx: number): unknown =>
@@ -163,6 +193,39 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
     referenceTagCol,
   } = mapping;
 
+  // ── Commentary state ───────────────────────────────────────────────────────
+  // An anchor is set either:
+  //   - Layout A: when a financial detail row with a referenceTag is pushed
+  //     (parentRowIndex is the index of that row in parsedRows)
+  //   - Layout B: when a commentary section header is detected — a row where
+  //     the source-code column holds a reference-tag pattern instead of a P-code
+  //     (parentRowIndex is null; matching is done by referenceTag in upload route)
+  interface CommentaryAnchor {
+    referenceTag: string;
+    sourceCode: string;        // empty string for Layout B
+    parentRowIndex: number | null;
+  }
+
+  let commentaryAnchor: CommentaryAnchor | null = null;
+  let commentaryBuffer: string[] = [];
+  const parsedCommentaries: ParsedCommentary[] = [];
+
+  function flushCommentaryBuffer(): void {
+    if (commentaryAnchor && commentaryBuffer.length > 0) {
+      for (const line of commentaryBuffer) {
+        const text = line.trim();
+        if (!text) continue;
+        parsedCommentaries.push({
+          parentRowIndex: commentaryAnchor.parentRowIndex,
+          sourceCode: commentaryAnchor.sourceCode,
+          referenceTag: commentaryAnchor.referenceTag,
+          commentaryText: text,
+        });
+      }
+    }
+    commentaryBuffer = [];
+  }
+
   // ── Process rows ──────────────────────────────────────────────────────────
   const parsedRows: ParsedRow[] = [];
   let currentSection: string | null = null;
@@ -173,6 +236,10 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
 
     // ── Blank row ────────────────────────────────────────────────────────
     if (isBlankRow(raw)) {
+      if (commentaryAnchor !== null) {
+        // Blank rows within a commentary block are silently skipped
+        continue;
+      }
       parsedRows.push({
         rowIndex: rowIndex++,
         sourceCode: "",
@@ -206,9 +273,27 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
     const referenceRaw =
       referenceTagCol !== null ? cellAt(r, referenceTagCol) : null;
 
-    // ── Determine display type ────────────────────────────────────────────
     const isDetailSource =
       sourceCodeRaw !== null && SOURCE_CODE_RE.test(sourceCodeRaw);
+
+    // ── Layout B: commentary section header ───────────────────────────────
+    // A row where the source-code column contains a reference-tag (e.g. "A1",
+    // "C1.1") rather than a P-code is the start of a commentary block at the
+    // bottom of the sheet.  It is consumed here and never added to parsedRows.
+    const isCommentarySectionHeader =
+      sourceCodeRaw !== null &&
+      REFERENCE_TAG_RE.test(sourceCodeRaw) &&
+      !SOURCE_CODE_RE.test(sourceCodeRaw);
+
+    if (isCommentarySectionHeader) {
+      flushCommentaryBuffer();
+      commentaryAnchor = {
+        referenceTag: sourceCodeRaw!,
+        sourceCode: "",          // resolved against the matched ReportRow in upload
+        parentRowIndex: null,    // matched by referenceTag, not by position
+      };
+      continue; // not a financial row — skip parsedRows
+    }
 
     const currentValue = parseNumericValue(currentRaw);
     const priorValue = parseNumericValue(priorRaw);
@@ -220,6 +305,23 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
       priorValue !== null ||
       varianceValue !== null;
 
+    // ── Layout A: inline commentary bullet row ────────────────────────────
+    // While a commentary anchor is active (Layout A or B), a row with no
+    // source code and no numeric values is a commentary bullet.
+    if (
+      commentaryAnchor !== null &&
+      !isDetailSource &&
+      !hasAnyNumeric &&
+      labelRaw.length > 0
+    ) {
+      commentaryBuffer.push(labelRaw);
+      continue; // not a financial row — skip parsedRows
+    }
+
+    // ── Structural row — flush any pending commentary first ───────────────
+    flushCommentaryBuffer();
+
+    // ── Determine display type ────────────────────────────────────────────
     let displayType: DisplayType;
     if (isDetailSource) {
       displayType = "detail";
@@ -241,6 +343,8 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
       }
     }
 
+    // ── Push financial row ────────────────────────────────────────────────
+    const thisRowIndex = rowIndex;
     parsedRows.push({
       rowIndex: rowIndex++,
       sourceCode: isDetailSource ? sourceCodeRaw! : "",
@@ -253,8 +357,7 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
       variancePercent,
       referenceTag,
       rawCurrentText: textAt(r, currentValueCol),
-      rawPriorText:
-        priorValueCol !== null ? textAt(r, priorValueCol) : null,
+      rawPriorText: priorValueCol !== null ? textAt(r, priorValueCol) : null,
       rawVarianceText:
         varianceValueCol !== null ? textAt(r, varianceValueCol) : null,
       rawVariancePercentText:
@@ -262,9 +365,25 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
       rawReferenceText:
         referenceTagCol !== null ? textAt(r, referenceTagCol) : null,
     });
+
+    // ── Update commentary anchor (Layout A) ───────────────────────────────
+    // Set anchor when a detail row with a referenceTag is pushed.
+    // Clear anchor for all other structural rows.
+    if (displayType === "detail" && referenceTag !== null) {
+      commentaryAnchor = {
+        referenceTag,
+        sourceCode: sourceCodeRaw!,
+        parentRowIndex: thisRowIndex,
+      };
+    } else {
+      commentaryAnchor = null;
+    }
   }
 
-  // Filter out leading/trailing blank rows
+  // Flush any commentary that trails the last row in the sheet
+  flushCommentaryBuffer();
+
+  // ── Trim leading/trailing blank rows ─────────────────────────────────────
   const firstNonBlank = parsedRows.findIndex((r) => r.displayType !== "blank");
   const lastNonBlank = [...parsedRows]
     .reverse()
@@ -278,11 +397,6 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
           parsedRows.length - (lastNonBlank === -1 ? 0 : lastNonBlank)
         );
 
-  // Re-index after trimming
-  trimmed.forEach((row, i) => {
-    row.rowIndex = i;
-  });
-
   if (trimmed.length === 0) {
     throw new Error("No parseable rows found in the sheet");
   }
@@ -295,5 +409,29 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
     );
   }
 
-  return { rows: trimmed, sheetName, warnings };
+  // Build original rowIndex → trimmed position map BEFORE re-indexing,
+  // so Layout A commentary (which stores original parentRowIndex values)
+  // can be re-mapped correctly.
+  const originalToTrimmedIdx = new Map<number, number>();
+  trimmed.forEach((row, i) => {
+    originalToTrimmedIdx.set(row.rowIndex, i);
+  });
+
+  // Re-index
+  trimmed.forEach((row, i) => {
+    row.rowIndex = i;
+  });
+
+  // Re-map Layout A commentary parentRowIndex values.
+  // Layout B commentaries have parentRowIndex: null — pass through unchanged.
+  const remappedCommentaries = parsedCommentaries
+    .map((c) => {
+      if (c.parentRowIndex === null) return c; // Layout B — no re-mapping needed
+      const trimmedIdx = originalToTrimmedIdx.get(c.parentRowIndex);
+      if (trimmedIdx === undefined) return null; // parent was trimmed away
+      return { ...c, parentRowIndex: trimmedIdx };
+    })
+    .filter((c): c is ParsedCommentary => c !== null);
+
+  return { rows: trimmed, commentaries: remappedCommentaries, sheetName, warnings };
 }

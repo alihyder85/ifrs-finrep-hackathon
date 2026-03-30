@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { FileSpreadsheet, Clock, Hash, ChevronRight } from "lucide-react";
+import { FileSpreadsheet, Clock, Hash, ChevronRight, Layers } from "lucide-react";
 import { UploadForm } from "@/components/reports/UploadForm";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConsolidationModal } from "@/components/ConsolidationModal";
 
 interface ReportSummary {
   id: string;
@@ -22,6 +23,7 @@ interface Props {
 
 export function ReportsClient({ initialReports }: Props) {
   const [reports, setReports] = useState(initialReports);
+  const [showConsolidationModal, setShowConsolidationModal] = useState(false);
 
   function handleUploadSuccess(result: {
     report: {
@@ -71,9 +73,20 @@ export function ReportsClient({ initialReports }: Props) {
       {/* Reports list */}
       {reports.length > 0 ? (
         <div>
-          <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
-            Imported reports
-          </h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              Imported reports
+            </h2>
+            {reports.length >= 2 && (
+              <button
+                onClick={() => setShowConsolidationModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border hover:bg-muted transition-colors font-medium"
+              >
+                <Layers className="h-3.5 w-3.5" />
+                Consolidate &amp; Export
+              </button>
+            )}
+          </div>
           <div className="space-y-2">
             {reports.map((report) => (
               <Link
@@ -121,6 +134,13 @@ export function ReportsClient({ initialReports }: Props) {
             Once imported, you can review rows, add commentary, and attach reference tags.
           </p>
         </div>
+      )}
+
+      {showConsolidationModal && (
+        <ConsolidationModal
+          reports={reports}
+          onClose={() => setShowConsolidationModal(false)}
+        />
       )}
     </div>
   );

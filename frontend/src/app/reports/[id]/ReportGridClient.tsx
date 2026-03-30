@@ -25,6 +25,7 @@ import {
   ChevronUp,
   ChevronDown,
   RefreshCw,
+  Download,
 } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
@@ -118,6 +119,8 @@ export function ReportGridClient({ report }: Props) {
   const [commentarySaving, setCommentarySaving] = useState(false);
   const [commentaryError, setCommentaryError] = useState<string | null>(null);
   const [commentarySaved, setCommentarySaved] = useState(false);
+  const [commentaryRefTag, setCommentaryRefTag] = useState("");
+  const [commentaryRefTagError, setCommentaryRefTagError] = useState<string | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Track the saved text to detect unsaved changes
@@ -126,6 +129,35 @@ export function ReportGridClient({ report }: Props) {
 
   // Bulk AI refinement modal
   const [showBulkModal, setShowBulkModal] = useState(false);
+
+  // Export dropdown
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+
+  async function downloadExport(filter: "all" | "referenced" | "commented") {
+    setExportMenuOpen(false);
+    setExportLoading(true);
+    try {
+      const res = await fetch(`/api/reports/${report.id}/export?filter=${filter}`);
+      if (!res.ok) {
+        toast("error", "Export failed — please try again");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${report.name.replace(/[^a-zA-Z0-9_-]/g, "_")}_export.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast("error", "Network error — export not downloaded");
+    } finally {
+      setExportLoading(false);
+    }
+  }
 
   // Navigable rows (skip blank and header rows)
   const navigableRows = useMemo(
@@ -268,6 +300,9 @@ export function ReportGridClient({ report }: Props) {
       return;
     }
     if (!confirmDiscardIfDirty()) return;
+    const row = rows.find((r) => r.id === id);
+    setCommentaryRefTag(row?.referenceTag ?? "");
+    setCommentaryRefTagError(null);
     setSelectedRowId(id);
     setEditingTag(false);
     setTagError(null);
@@ -397,8 +432,20 @@ export function ReportGridClient({ report }: Props) {
       return;
     }
 
+    // Require a reference tag — either already on the row or entered by user
+    const refTag = selectedRow.referenceTag ?? commentaryRefTag.trim().toUpperCase();
+    if (!refTag) {
+      setCommentaryRefTagError("Reference tag is required before saving commentary");
+      return;
+    }
+    if (!REFERENCE_TAG_REGEX.test(refTag)) {
+      setCommentaryRefTagError("Format must be like A1, C1.1, M1.8");
+      return;
+    }
+
     setCommentarySaving(true);
     setCommentaryError(null);
+    setCommentaryRefTagError(null);
 
     try {
       const res = await fetch(
@@ -406,7 +453,7 @@ export function ReportGridClient({ report }: Props) {
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ commentaryText: text }),
+          body: JSON.stringify({ commentaryText: text, referenceTag: refTag }),
         }
       );
 
@@ -421,13 +468,18 @@ export function ReportGridClient({ report }: Props) {
       setCommentary(data.commentary);
       setCommentaryText(data.commentary.commentaryText);
 
-      // Update grid dot if this row had no commentary before
+      // Sync grid: commentary dot + referenceTag if it was just assigned
       setRows((prev) =>
-        prev.map((r) =>
-          r.id === selectedRow.id && r._count.commentaries === 0
-            ? { ...r, _count: { commentaries: 1 } }
-            : r
-        )
+        prev.map((r) => {
+          if (r.id !== selectedRow.id) return r;
+          return {
+            ...r,
+            referenceTag: data.referenceTag ?? r.referenceTag,
+            _count: {
+              commentaries: r._count.commentaries === 0 ? 1 : r._count.commentaries,
+            },
+          };
+        })
       );
 
       setCommentarySaved(true);
@@ -666,15 +718,58 @@ export function ReportGridClient({ report }: Props) {
               )}
             </div>
 
-            {rowsWithCommentary > 0 && (
-              <button
-                onClick={() => setShowBulkModal(true)}
-                className="mt-2 flex items-center gap-1.5 h-7 px-2.5 rounded text-xs font-medium border border-input bg-background hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-              >
-                <Sparkles className="h-3 w-3 text-blue-500" />
-                AI based commentary refinement
-              </button>
-            )}
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              {rowsWithCommentary > 0 && (
+                <button
+                  onClick={() => setShowBulkModal(true)}
+                  className="flex items-center gap-1.5 h-7 px-2.5 rounded text-xs font-medium border border-input bg-background hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                >
+                  <Sparkles className="h-3 w-3 text-blue-500" />
+                  AI based commentary refinement
+                </button>
+              )}
+
+              {/* Export dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setExportMenuOpen((v) => !v)}
+                  disabled={exportLoading}
+                  className="flex items-center gap-1.5 h-7 px-2.5 rounded text-xs font-medium border border-input bg-background hover:bg-muted transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  {exportLoading ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Download className="h-3 w-3" />
+                  )}
+                  Export
+                  <ChevronDown className="h-3 w-3" />
+                </button>
+
+                {exportMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-10"
+                      onClick={() => setExportMenuOpen(false)}
+                    />
+                    <div className="absolute left-0 top-full mt-1 z-20 w-48 rounded-md border border-border bg-background shadow-md py-1">
+                      {[
+                        { label: "Export All Rows", filter: "all" as const },
+                        { label: "Referenced Rows Only", filter: "referenced" as const },
+                        { label: "Commented Rows Only", filter: "commented" as const },
+                      ].map(({ label, filter }) => (
+                        <button
+                          key={filter}
+                          onClick={() => downloadExport(filter)}
+                          className="w-full text-left px-3 py-2 text-xs hover:bg-muted transition-colors"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1093,6 +1188,33 @@ export function ReportGridClient({ report }: Props) {
                   </div>
                 ) : (
                   <>
+                    {!selectedRow.referenceTag && (
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                          Reference Tag
+                          <span className="text-red-500 text-xs">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={commentaryRefTag}
+                          onChange={(e) => {
+                            setCommentaryRefTag(e.target.value);
+                            setCommentaryRefTagError(null);
+                          }}
+                          placeholder="e.g. A1, C1.1, M1.8"
+                          disabled={commentarySaving}
+                          className={cn(
+                            "w-full h-7 px-2 text-xs font-mono rounded border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-60",
+                            commentaryRefTagError
+                              ? "border-red-400 focus:ring-red-400"
+                              : "border-input"
+                          )}
+                        />
+                        {commentaryRefTagError && (
+                          <p className="text-xs text-red-600">{commentaryRefTagError}</p>
+                        )}
+                      </div>
+                    )}
                     <textarea
                       value={commentaryText}
                       onChange={(e) => {

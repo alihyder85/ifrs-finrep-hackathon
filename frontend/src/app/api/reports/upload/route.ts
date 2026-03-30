@@ -93,10 +93,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { rows, warnings } = parseResult;
+  const { rows, commentaries, warnings } = parseResult;
 
   // ── Persist in a single transaction ────────────────────────────────────
   let report;
+  let commentaryCount = 0;
   try {
     report = await prisma.$transaction(async (tx) => {
       const created = await tx.report.create({
@@ -129,6 +130,52 @@ export async function POST(req: NextRequest) {
         })),
       });
 
+      // ── Ingest imported commentary rows ────────────────────────────────
+      if (commentaries.length > 0) {
+        // Fetch created rows to build two lookup maps:
+        //   Layout A (inline): match by parentRowIndex (precise, positional)
+        //   Layout B (block at bottom): match by referenceTag
+        const createdRows = await tx.reportRow.findMany({
+          where: { reportId: created.id },
+          select: { id: true, rowIndex: true, sourceCode: true, referenceTag: true },
+        });
+
+        const rowByIndex = new Map(createdRows.map((r) => [r.rowIndex, r]));
+        const rowByRefTag = new Map(
+          createdRows
+            .filter((r) => r.referenceTag)
+            .map((r) => [r.referenceTag!, r])
+        );
+
+        const commentaryData = commentaries
+          .map((c) => {
+            // Layout A: parentRowIndex is set — use precise positional match
+            // Layout B: parentRowIndex is null — fall back to referenceTag match
+            const parentIdx = c.parentRowIndex;
+            const row =
+              parentIdx !== null
+                ? rowByIndex.get(parentIdx)
+                : rowByRefTag.get(c.referenceTag);
+
+            if (!row) return null;
+
+            return {
+              reportId: created.id,
+              reportRowId: row.id,
+              sourceCode: row.sourceCode,
+              referenceTagSnapshot: row.referenceTag ?? c.referenceTag,
+              commentaryText: c.commentaryText,
+              commentarySource: "IMPORTED" as const,
+            };
+          })
+          .filter((c): c is NonNullable<typeof c> => c !== null);
+
+        if (commentaryData.length > 0) {
+          await tx.commentary.createMany({ data: commentaryData });
+          commentaryCount = commentaryData.length;
+        }
+      }
+
       return created;
     });
   } catch (err) {
@@ -148,6 +195,7 @@ export async function POST(req: NextRequest) {
         currency: report.currency,
         sourceFileName: report.sourceFileName,
         rowCount: rows.length,
+        commentaryCount,
       },
       warnings,
     },
